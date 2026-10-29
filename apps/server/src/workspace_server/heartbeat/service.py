@@ -53,15 +53,19 @@ from . import learning, memory, n8n
 from . import n8n_templates as templates
 
 log = logging.getLogger(__name__)
-CLI_CADENCE = 240  # minutes between reads of a new connector that reads through a CLI
+CLI_CADENCE = 1440  # minutes between reads of a new connector that reads through a CLI: daily
 FIRST_LOOK = "the last 7 days"  # how far back a connector's first read looks
 ACCOUNT_TTL = 1800.0  # seconds a listing of the Claude account's connectors is kept
 ACCOUNT_RECHECKS = 2  # fresh listings for an account connector still connecting
 ACCOUNT_PLACE = "Your Claude account"
 
 CADENCES = (5, 15, 30, 60)
-OWN_CADENCES = (*CADENCES, 240, 1440)  # a connector may read less often: every 4 hours, daily
-QUIET_GAP = 720  # minutes: a connector with nothing new for long is still read this often
+OWN_CADENCES = (
+    *CADENCES,
+    240,
+    1440,
+)  # a connector may read less often: 4 hours, daily (default)
+QUIET_GAP = 2880  # minutes: a connector with nothing new for long is still read this often
 MEMORY_CADENCE = 1440  # minutes between memory reads after onboarding: daily
 MEMORY_ITEMS = 40  # context packets one memory read may bring
 ASK_CHARS = 1000  # characters of what the owner asks a read to look for
@@ -96,7 +100,7 @@ INBOX_MAX = 200  # items one post may bring
 LOCK_MINUTES = 20  # a beat that holds the lock longer than this has stopped: its lock expires
 BACKOFF_MINUTES = 30  # after a provider limit, scheduled beats wait this long
 MAX_ITEMS = 25  # items read from one connector in one beat
-READ_OPENS = 6  # items a read opens in full, newest first, after listing what changed
+READ_OPENS = 3  # items a read opens in full, newest first, after one listing of what changed
 FILE_WORDS = 4000  # characters of a Scout file the judge reads
 
 
@@ -515,9 +519,9 @@ class Heartbeat:
                             "id": cid,
                             "workspace_id": tx.workspace_id,
                             **values,
-                            # A read through a CLI costs tokens (33k to 206k measured):
-                            # every 4 hours unless the owner says otherwise. Scout (no
-                            # tokens) reads every beat.
+                            # A read through a CLI costs tokens: daily unless the owner
+                            # says otherwise (section 17.4). Scout (no tokens) reads every
+                            # beat.
                             "cadence_minutes": CLI_CADENCE,
                             "feeds": [],
                             "enabled": on,
@@ -1654,7 +1658,7 @@ class Heartbeat:
         return [self.beat_view(r) for r in self._beats(since=since, limit=max(1, min(limit, 100)))]
 
     def next_beat_at(self, settings: dict[str, Any], last: dict[str, Any] | None) -> str | None:
-        if settings.get("paused"):
+        if settings.get("paused") or not self.set_up():
             return None
         now = self.ws.rt.clock.now()
         due = (
@@ -1704,9 +1708,10 @@ class Heartbeat:
         elif not any(c["enabled"] for c in listed):
             state = "no_connectors"
             line = (
-                "No connector is on. Find connectors in your CLIs in Settings, Approval."
+                "Off until a connector is on. Find connectors in your CLIs in Settings, Approval."
                 if listed
-                else "No connectors yet. Find connectors in your CLIs in Settings, Approval."
+                else "Off until you set up a connector. Find connectors in your CLIs in "
+                "Settings, Approval."
             )
         elif quiet:
             state = "quiet"
@@ -1753,10 +1758,16 @@ class Heartbeat:
 
     # ---------------------------------------------------------------- the beat
 
+    def set_up(self) -> bool:
+        """Whether any connector is on: until one is, the heartbeat is off (section 17.4)."""
+        return any(
+            r["enabled"] and r["present"] and r["how"] != "computer" for r in self._connectors()
+        )
+
     def due(self) -> bool:
         """Whether the worker should beat now (a scheduled beat)."""
         settings = self.settings()
-        if settings.get("paused") or self.in_quiet_hours(settings):
+        if settings.get("paused") or self.in_quiet_hours(settings) or not self.set_up():
             return False
         rows = self._beats(limit=1)
         at = self.next_beat_at(settings, rows[0] if rows else None)
@@ -1879,8 +1890,13 @@ class Heartbeat:
     def _due_connectors(self, trigger: str, cadence: int) -> list[dict[str, Any]]:
         now = self.ws.rt.clock.now()
         out = []
-        for row in self._connectors():
+        rows = self._connectors()
+        # An app n8n reads (no tokens) is not also read through a CLI (section 17.4).
+        by_n8n = {r["id"].partition(":")[2] for r in rows if r["how"] == "n8n" and r["enabled"]}
+        for row in rows:
             if not row["enabled"] or not row["present"] or row["how"] == "computer":
+                continue
+            if row["how"] not in TOKENLESS and templates.app_of(row["name"]) in by_n8n:
                 continue
             if trigger == "onboarding":
                 if row["how"] == "memory":
@@ -1890,7 +1906,8 @@ class Heartbeat:
                 continue
             own = int(row["cadence_minutes"] or 0)
             needed = max(own, cadence) if trigger == "schedule" else own
-            if trigger == "schedule" and row["how"] == "mcp" and not row["last_items"]:
+            if trigger == "schedule" and row["how"] not in TOKENLESS and not row["last_items"]:
+                # Every read that costs tokens backs off while nothing is newer (17.4).
                 needed = max(needed, self._quiet_gap(row, now))
             if row["last_read_at"] and needed:
                 elapsed = (now - parse_iso(row["last_read_at"])).total_seconds() / 60
@@ -1901,7 +1918,7 @@ class Heartbeat:
 
     def _quiet_gap(self, row: dict[str, Any], now: Any) -> int:
         """Minutes between scheduled reads of a connector whose last read found nothing new:
-        half the time it has been quiet, at most QUIET_GAP (12 hours). A read through a CLI
+        half the time it has been quiet, at most QUIET_GAP (two days). A read through a CLI
         costs tokens even when nothing is new; anything new brings its own cadence back."""
         seen = schema.heartbeat_seen
         with self.ws.rt.read() as tx:
@@ -1931,8 +1948,9 @@ class Heartbeat:
         listed = "\n".join(line(*part) for part in parts)
         return (
             "Read, read-only, what changed in each of these connectors since the time given. "
-            "First list or search for what changed since then; then open at most "
-            f"{READ_OPENS} items a connector, the newest first, all in one step, and stop. "
+            "Make one list or search call for what changed since then; then open at most "
+            f"{READ_OPENS} items a connector, the newest first, all in one step, and stop: no "
+            "further calls. "
             "When the list or search shows each item's date and none is newer than that time, "
             "answer at once with an empty list; when it shows no dates, open the newest to "
             "check. "

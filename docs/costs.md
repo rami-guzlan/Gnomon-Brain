@@ -45,6 +45,9 @@ connector with many large tools costs more even when nothing is new. Real Test r
 - Reading several connectors in one run costs less than reading them one by one. A real
   beat reading Drive, Notion and HubSpot together took 277,000 tokens in 50 seconds, against
   about 400,000 for the three read apart.
+- Since October 29 a read makes one list or search call, then opens at most the 3 newest
+  items in one step (it opened 6 before) and answers: no tool loop. The table above was
+  measured with 6 opens, so reads now cost at most that.
 - Each read has a cap on turns and on spend ($0.05 a connector). A read that reaches either
   fails and says so, instead of passing as nothing new.
 - A read whose list shows dates, none newer than the last read, answers at once: that halved
@@ -58,48 +61,64 @@ earlier default (Opus) in 79. Sonnet is enough, at half Opus's price ($0.018 a c
 What makes up a run's tokens:
 - Claude Code's own prompt is about 3,900 tokens when Gnomon starts it: no built-in tools,
   none of your own settings, only the MCP servers the run needs.
-- The Brain's tools are about 6,600 tokens: 15 grouped tools and their short introduction. The
+- The Brain's tools are about 790 tokens: three tools (`context`, `brain`, `propose`) and
+  their short introduction. They were about 6,600 (15 grouped tools) before October 29. The
   app's own tools, which a job uses, are at most about 7,200.
 - Each further turn of a run reads all of that again, from cache. Fewer turns is the biggest
   saving. That is why a job's packet carries its project: before it did, the same note took
   13 tool calls and 142,000 tokens.
 
 An AI app you use yourself (Claude Code, Claude Desktop, Codex) pays for its own prompt and
-tools on every turn, as it would without Gnomon. The Brain adds its tools and about 800 tokens
-of startup and first packet to each session. Run headless with all of Claude Code's built-in
+tools on every turn, as it would without Gnomon. The Brain adds its three tools (about 790
+tokens) to each session, plus its packets. Measured on the knowledge-company starter Brain:
+
+- the first packet is about 830 tokens when the app loaded the Brain's startup file, and
+  1,450 when it did not;
+- a new ask in the same conversation is about 450 tokens;
+- an edit is about 80 tokens.
+
+On a 258-note Brain the same three are about 2,050, 1,180 and 100 tokens. A writing request
+there carries the person's own writing rules whole. Run headless with all of Claude Code's built-in
 tools and your own settings, the same two-turn answer came to 105,000 tokens, not 29,000.
 
 ## A day
 
-How often connectors are read is most of it. A connector read through Claude Code is read
-every 4 hours unless you set it otherwise, and one whose reads find nothing new spaces out on
-its own: half the time it has been quiet, at most every 12 hours, and back to its own cadence
-when something new comes in. That comes to about 5 reads a day per connector.
+How often connectors are read is most of it. Since October 29:
+
+- The heartbeat is off until a connector is on.
+- A connector read through Claude Code is read daily unless you set it otherwise.
+- A connector whose reads find nothing new spaces out on its own: half the time it has been
+  quiet, at most every two days, and back to daily when something new comes in.
+- An app that an n8n workflow reads is not also read through Claude Code.
+
+The table is estimated from the October 28 measurements above, with one read a day. Before
+October 29 the default was every 4 hours, about 5 reads a day per connector, and a typical
+day came to about 1.6 million tokens.
 
 | | Light | Typical | Heavy |
 |---|---|---|---|
 | Connectors read through Claude Code | 1 (Drive) | 3 (Drive, Notion, HubSpot) | 6 |
-| Reads a day of each | about 5 | about 5 | about 6 |
+| Reads a day of each | 1 | 1 | 1 |
 | Work with AI jobs | 0 | 2 | 10 |
 | Test runs after the distill | 0 | 10 | 20 (the daily cap) |
 | Side-by-side check calls | 3 | 10 | 30 |
-| **Tokens** | **about 0.3 million** | **about 1.6 million** | **about 5 million** |
-| **of which connector reads** | 0.29 million | 1.4 million | 4 million |
-| **Cost on Haiku 5.5, the check on Sonnet 5.5** | **about $0.06** | **about $0.10 to $0.25** | **about $0.60** |
+| **Tokens** | **about 0.07 million** | **about 0.5 million** | **about 1.5 million** |
+| **of which connector reads** | 0.06 million | 0.28 million | 0.6 million |
+| **Cost on Haiku 5.5, the check on Sonnet 5.5** | **about $0.01** | **about $0.04 to $0.10** | **about $0.25** |
 
-A typical day is about 1.4 million tokens of connector reads (5 beats of the three together,
-277,000 each) and about 1.6 million in all, for $0.10 to $0.25. Notion is the expensive one:
-about 191,000 tokens a read even when nothing is new, three times Drive's. Read hourly, the
-same three connectors would take about 3.9 million tokens a day.
+A typical day is one beat reading the three connectors together, at most about 277,000
+tokens, and about 0.5 million tokens in all. That is roughly a third of the earlier default.
+Notion stays the expensive one, because its search shows no dates. An n8n read of an app
+costs nothing. The numbers come down further when a connector stays quiet.
 
 ## Settings that change it
 
 - **Read through n8n.** A connector read by an n8n workflow on your computer costs no tokens.
   The Heartbeat card offers it for every app it can draft a workflow for.
 - **A connector's own cadence.** In the Heartbeat card, each connector has its own: every 5,
-  15, 30 or 60 minutes for fresher news and more tokens, every 4 hours (the default) or daily
-  for fewer. Daily, the typical day's three connectors take about 0.35 million tokens. Turn
-  off a connector you don't need. A quiet connector already spaces out its reads.
+  15, 30 or 60 minutes or every 4 hours for fresher news and more tokens, or daily (the
+  default). Every 4 hours, the typical day's three connectors take about 1.4 million tokens.
+  Turn off a connector you don't need. A quiet connector already spaces out its reads.
 - **The ingest model.** The distill, the judge and the world drafts run on it: Haiku by
   default, which passed every gate of the recorded day.
 - **Side-by-side checks.** The Brain's policy `model_checks` (on by default) turns the

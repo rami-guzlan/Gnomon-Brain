@@ -310,7 +310,7 @@ def hb(runtime, client):
 
 def found(owner, *, codex=False, per_beat=True):
     """Find connectors in the CLIs; the Codex tracker stays off unless a test reads it. The
-    mail server is read every beat here (a new one is read every 4 hours), so a test can beat
+    mail server is read every beat here (a new one is read daily), so a test can beat
     twice."""
     result = owner.ok(owner.post("/api/heartbeat/connectors/rescan"))
     if not codex:
@@ -987,11 +987,40 @@ def test_a_connector_read_for_the_first_time_looks_back_a_week(owner, fake_cli):
     assert "the last 7 days" not in again["prompt"] and "2026-09-28T12:40:00Z" in again["prompt"]
 
 
-def test_a_new_connector_that_reads_through_a_cli_is_read_every_four_hours(owner):
+def test_a_new_connector_that_reads_through_a_cli_is_read_daily(owner):
     owner.ok(owner.post("/api/heartbeat/connectors/rescan"))
     rows = {c["id"]: c for c in owner.ok(owner.get("/api/heartbeat/status"))["connectors"]}
-    assert rows["claude:mail"]["cadence_minutes"] == 240  # a read costs 33k to 206k tokens
+    assert rows["claude:mail"]["cadence_minutes"] == 1440  # a read costs tokens: daily
     assert rows["scout"]["cadence_minutes"] is None  # Scout costs no tokens: every beat
+
+
+def test_the_heartbeat_is_off_until_a_connector_is_set_up(owner, hb):
+    worker = hb_service.HeartbeatWorker(hb)
+    assert not hb.due()
+    status = owner.ok(owner.get("/api/heartbeat/status"))
+    assert status["state"] == "no_connectors" and status["next_beat_at"] is None
+    assert status["line"].startswith("Off until")
+    found(owner)
+    assert hb.due()
+    assert worker.run_once()["status"] == "done"
+
+
+def test_an_app_n8n_reads_is_not_also_read_through_a_cli(owner, hb, fake_cli, monkeypatch):
+    found(owner)
+    monkeypatch.setattr(
+        hb_service.templates, "app_of", lambda name: "gmail" if "mail" in name else None
+    )
+    hb.add_n8n(
+        hb.ws.owner(),
+        name="Gmail through n8n",
+        workflow=n8n_workflow(),
+        feeds=[],
+        connector_id="n8n:gmail",
+        line="test",
+    )
+    owner.ok(owner.put("/api/heartbeat/connectors/n8n:gmail", json={"enabled": True}))
+    beat(owner)
+    assert fake_cli.reads() == []  # no tokens spent on what n8n brings
 
 
 # ---------------------------------------------------------------------- reads through n8n
@@ -2130,7 +2159,7 @@ def test_the_connectors_say_how_to_sign_in_when_they_must(owner, fake_cli):
 
 def test_a_connector_that_stays_quiet_is_read_less_often(owner, hb, clock, fake_cli):
     # A read costs tokens even when nothing is new: a connector that stays quiet is read less
-    # often on the schedule (half the time it has been quiet, at most every 12 hours), and its
+    # often on the schedule (half the time it has been quiet, at most every two days), and its
     # own cadence comes back as soon as something new arrives.
     found(owner)
     owner.ok(owner.put("/api/heartbeat/settings", json={"quiet_hours": "off"}))
@@ -2148,6 +2177,6 @@ def test_a_connector_that_stays_quiet_is_read_less_often(owner, hb, clock, fake_
 
     worker.run_once()  # the first read: the item is new
     fake_cli.items = []  # nothing new from here on
-    assert ticks(30) == [1, 2, 4, 8, 12]  # read hourly, it would be 29 reads
+    assert ticks(30) == [1, 2, 4, 8]  # read hourly, it would be 29 reads
     fake_cli.items = [dict(ITEM, id="msg-2", title="Another")]
     assert ticks(14)[:2] == [1, 1]  # something new: hourly again, then spacing out

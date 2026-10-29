@@ -122,7 +122,7 @@ flowchart LR
     subgraph Reads["Connectors, read-only"]
         SC["Scout folders: no tokens"]
         N8["n8n workflows: no tokens"]
-        CLI["Connectors in your CLIs, through Claude Code: every 4 hours by default"]
+        CLI["Connectors in your CLIs, through Claude Code: daily by default"]
         MEM["What each CLI keeps on you: its memory and your chats, daily"]
     end
     Reads -->|"each read once per beat, from where it last stopped"| J["Judge: one model call for the new items"]
